@@ -108,8 +108,6 @@ If not suitable for posting:
 }
 `
 
-
-
 async function AI(message, bot) {
   try {
       const response = await openai.chat.completions.create({
@@ -132,7 +130,7 @@ async function AI(message, bot) {
     <b>Input Message:</b>\n
     ${message.slice(0, 100)}...
     `;
-    const yourTelegramUserId = 7356211563; 
+    const yourTelegramUserId = process.env.Owner_ID || 7356211563; 
     bot.sendMessage(yourTelegramUserId, errorMessage, { parse_mode: 'HTML' });
 
     return {
@@ -141,7 +139,5 @@ async function AI(message, bot) {
     };
   }
 }
-
-
 
 export default AI;
