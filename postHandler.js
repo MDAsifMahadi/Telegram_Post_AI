@@ -126,7 +126,41 @@ async function AI(message, bot) {
     console.error('Error in AI processing:', error);
 
     const errorMessage = `
-    ❗️AI Error:<code>${error.message}</code>
+    ❗️Frast AI Failed:<code>${error.message}</code>
+    <b>Input Message:</b>\n
+    ${message.slice(0, 100)}...
+    `;
+    const yourTelegramUserId = process.env.Owner_ID || 7356211563; 
+    bot.sendMessage(yourTelegramUserId, errorMessage, { parse_mode: 'HTML' });
+
+    return await fallback(message, bot);
+  }
+}
+// Fallback function to handle errors and use a different AI provider
+const fallback = async (message, bot) => {
+  const openai = new OpenAI({
+    baseURL: "https://openrouter.ai/api/v1",
+    apiKey: process.env.open_rowter_api,
+  });
+
+  try {
+    const response = await openai.chat.completions.create({
+    model: "deepseek/deepseek-r1:free",
+    messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: message }
+      ],
+    });
+
+    const res = response.choices[0].message;
+    const parsed = JSON.parse(res.content);
+
+    return parsed;
+  } catch (error) {
+    console.error('Error in AI processing:', error);
+
+    const errorMessage = `
+    ❗️Lest AI Faided:<code>${error.message}</code>
     <b>Input Message:</b>\n
     ${message.slice(0, 100)}...
     `;
@@ -138,6 +172,6 @@ async function AI(message, bot) {
       text: message
     };
   }
-}
+};
 
 export default AI;
