@@ -137,14 +137,13 @@ async function postMediaGroup(mediaItems) {
 }
 
 // একক পোস্টিং
-async function postSingleMessage(message) {
+async function postSingleMessage(message, srcChannel) {
   let file = null;
   try {
     if (message.media) {
       file = await downloadMedia(message);
       if (!file) return;
-
-      const res = await AI(file.caption, bot); // AI থেকে অনুমোদন এবং টেক্সট প্রাপ্তি
+      const res = await AI(file.caption, bot, srcChannel); // AI থেকে অনুমোদন এবং টেক্সট প্রাপ্তি
       file.caption = res.text;
       const stats = fs.statSync(file.path);
       const sizeMB = stats.size / (1024 * 1024);
@@ -178,7 +177,7 @@ async function postSingleMessage(message) {
       }
     } else if (message.message) {
       const text = formatMessage(message.message, message.entities || []);
-      const res =  await AI(text, bot);
+      const res =  await AI(text, bot, srcChannel);
       console.log('📤 একক পোস্ট:', res.should_post);
       if (!res.should_post) {
         console.log('🚫 পোস্ট বাতিল: AI থেকে অনুমোদন নেই');
@@ -256,7 +255,7 @@ async function main() {
         const captionMessage = uniqueMessages.find(m => m.message && m.message.length > 0);
         let caption = captionMessage ? formatMessage(captionMessage.message, captionMessage.entities || []) : '';
 
-        const res = await AI(caption, bot); // AI থেকে অনুমোদন এবং টেক্সট প্রাপ্তি  
+        const res = await AI(caption, bot, channelEntities.get(channelId).username); // AI থেকে অনুমোদন এবং টেক্সট প্রাপ্তি  
         if (!res.should_post) {
           console.log('🚫 গ্রুপ পোস্ট বাতিল: AI থেকে অনুমোদন নেই');
           mediaGroups.delete(groupedId);
@@ -285,7 +284,7 @@ async function main() {
     } else {
       processedMessages.add(message.id);
       console.log(`📥 একক পোস্ট: ${channelEntities.get(channelId).username}`);
-      await postSingleMessage(message);
+      await postSingleMessage(message, channelEntities.get(channelId).username);
     }
   });
 }

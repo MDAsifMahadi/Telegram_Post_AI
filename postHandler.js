@@ -108,7 +108,7 @@ If not suitable for posting:
 }
 `
 
-async function AI(message, bot) {
+async function AI(message, bot, srcChannel) {
   try {
       const response = await openai.chat.completions.create({
       model: 'provider-3/gpt-4',
@@ -120,6 +120,8 @@ async function AI(message, bot) {
 
     const res = response.choices[0].message;
     const parsed = JSON.parse(res.content);
+    const addedSrcChannel = parsed.text + ` #${srcChannel}` || parsed.text;
+    parsed.text = addedSrcChannel;
     return parsed;
   
   } catch (error) {
@@ -133,11 +135,11 @@ async function AI(message, bot) {
     const yourTelegramUserId = process.env.Owner_ID || 7356211563; 
     bot.sendMessage(yourTelegramUserId, errorMessage, { parse_mode: 'HTML' });
 
-    return await fallback(message, bot);
+    return await fallback(message, bot, srcChannel);
   }
 }
 // Fallback function to handle errors and use a different AI provider
-const fallback = async (message, bot) => {
+const fallback = async (message, bot, srcChannel) => {
   const openai = new OpenAI({
     baseURL: "https://openrouter.ai/api/v1",
     apiKey: process.env.open_rowter_api,
@@ -154,7 +156,8 @@ const fallback = async (message, bot) => {
 
     const res = response.choices[0].message;
     const parsed = JSON.parse(res.content);
-
+    const addedSrcChannel = parsed.text + ` #${srcChannel}` || parsed.text;
+    parsed.text = addedSrcChannel;
     return parsed;
   } catch (error) {
     console.error('Error in AI processing:', error);
@@ -169,7 +172,7 @@ const fallback = async (message, bot) => {
 
     return {
       should_post: true,
-      text: message
+      text: message + ` #${srcChannel}`
     };
   }
 };
