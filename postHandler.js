@@ -110,32 +110,36 @@ If not suitable for posting:
 
 async function AI(message, bot, srcChannel) {
   try {
-      const response = await openai.chat.completions.create({
-      model: 'provider-3/gpt-4',
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: message }
-      ],
-    });
+    //   const response = await openai.chat.completions.create({
+    //   model: 'provider-3/gpt-4',
+    //   messages: [
+    //     { role: 'system', content: SYSTEM_PROMPT },
+    //     { role: 'user', content: message }
+    //   ],
+    // });
 
-    const res = response.choices[0].message;
-    const parsed = JSON.parse(res.content);
-    const addedSrcChannel = parsed.text + ` #${srcChannel}` || parsed.text;
-    parsed.text = addedSrcChannel;
-    return parsed;
+    // const res = response.choices[0].message;
+    // const parsed = JSON.parse(res.content);
+    // // const addedSrcChannel = parsed.text + ` #${srcChannel}` || parsed.text;
+    // const addedSrcChannel = message + ` #${srcChannel}` || parsed.text;
+    // parsed.text = addedSrcChannel;
+    return {
+      should_post: true,
+      text: message + ` #${srcChannel}`
+    };
   
   } catch (error) {
-    console.error('Error in AI processing:', error);
+    // console.error('Error in AI processing:', error);
 
-    const errorMessage = `
-    ❗️Frast AI Failed:<code>${error.message}</code>
-    <b>Input Message:</b>\n
-    ${message.slice(0, 100)}...
-    `;
-    const yourTelegramUserId = process.env.Owner_ID || 7356211563; 
-    bot.sendMessage(yourTelegramUserId, errorMessage, { parse_mode: 'HTML' });
+    // const errorMessage = `
+    // ❗️Frast AI Failed:<code>${error.message}</code>
+    // <b>Input Message:</b>\n
+    // ${message.slice(0, 100)}...
+    // `;
+    // const yourTelegramUserId = process.env.Owner_ID || 7356211563; 
+    // bot.sendMessage(yourTelegramUserId, errorMessage, { parse_mode: 'HTML' });
 
-    return await fallback(message, bot, srcChannel);
+    // return await fallback(message, bot, srcChannel);
   }
 }
 // Fallback function to handle errors and use a different AI provider
