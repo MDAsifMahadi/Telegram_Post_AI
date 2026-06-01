@@ -1,3 +1,6 @@
+process.env.NTBA_FIX_319 = 1;
+process.env.NTBA_FIX_350 = 0;
+
 import 'dotenv/config';
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
@@ -21,7 +24,7 @@ if (!fs.existsSync('downloads')) {
   fs.mkdirSync('downloads');
 }
 
-const bot = new TelegramBot(botToken);
+const bot = new TelegramBot(botToken, { polling: false });
 const client = new TelegramClient(stringSession, apiId, apiHash, {
   connectionRetries: 5,
 });
@@ -30,7 +33,6 @@ const processedMessages = new Set();
 const mediaGroups = new Map();
 const groupTimers = new Map();
 
-// HTML স্পেশাল ক্যারেক্টার সঠিক ESCAPE করার ফাংশন
 function escapeHTML(str) {
   return str
     .replace(/&/g, '&amp;')
@@ -38,7 +40,6 @@ function escapeHTML(str) {
     .replace(/>/g, '&gt;');
 }
 
-// Telegram entities থেকে HTML ট্যাগ যুক্ত করে টেক্সট ফরম্যাট করার ফাংশন (নেস্টেড সাপোর্ট সহ)
 function formatMessage(text, entities = []) {
   if (!entities || entities.length === 0) return escapeHTML(text);
 
@@ -75,7 +76,7 @@ function formatMessage(text, entities = []) {
     if (!insertions[entity.offset + entity.length]) insertions[entity.offset + entity.length] = { open: [], close: [] };
 
     insertions[entity.offset].open.push(startTag);
-    insertions[entity.offset + entity.length].close.unshift(endTag); // reverse order
+    insertions[entity.offset + entity.length].close.unshift(endTag);
   }
 
   let result = '';
@@ -89,13 +90,22 @@ function formatMessage(text, entities = []) {
   return result;
 }
 
+function getFileExtension(mime) {
+  if (mime.startsWith('video/')) return '.mp4';
+  if (mime.startsWith('image/')) return '.jpg';
+  if (mime.startsWith('audio/')) {
+    if (mime.includes('mpeg')) return '.mp3';
+    if (mime.includes('ogg')) return '.ogg';
+    return '.ogg';
+  }
+  return '.bin';
+}
 
-// মিডিয়া ডাউনলোডার
 async function downloadMedia(message) {
   try {
     const buffer = await client.downloadMedia(message.media, {});
-    const mime = message.media?.document?.mimeType || '';
-    const extension = mime.startsWith('video') ? '.mp4' : '.jpg';
+    const mime = message.media?.document?.mimeType || 'image/jpeg';
+    const extension = getFileExtension(mime);
     const filePath = path.join('downloads', `media_${message.id}${extension}`);
     fs.writeFileSync(filePath, buffer);
 
@@ -108,15 +118,23 @@ async function downloadMedia(message) {
   }
 }
 
-// মিডিয়া গ্রুপ পোস্টিং
+function safeDelete(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (err) {
+    console.error(`⚠️ ফাইল ডিলিট করতে সমস্যা: ${filePath}`, err.message);
+  }
+}
+
 async function postMediaGroup(mediaItems) {
   try {
     const mediaGroup = mediaItems.map((item, index) => {
-      const stream = fs.createReadStream(item.path);
       const type = item.mime.startsWith('video') ? 'video' : 'photo';
       return {
         type,
-        media: stream,
+        media: item.path,
         parse_mode: 'HTML',
         caption: index === 0 ? item.caption : undefined,
         ...(type === 'video' ? { supports_streaming: true } : {}),
@@ -126,34 +144,27 @@ async function postMediaGroup(mediaItems) {
     await bot.sendMediaGroup(destinationChannel, mediaGroup);
 
     for (const item of mediaItems) {
-      if (fs.existsSync(item.path)) {
-        fs.unlinkSync(item.path);
-        console.log(`🧹 ডিলিট: ${item.path}`);
-      }
+      safeDelete(item.path);
     }
   } catch (err) {
     console.error('❌ মিডিয়া গ্রুপ পাঠাতে সমস্যা:', err.message);
   }
 }
 
-// একক পোস্টিং
 async function postSingleMessage(message, srcChannel) {
   let file = null;
   try {
     if (message.media) {
       file = await downloadMedia(message);
       if (!file) return;
-      const res = await AI(file.caption, bot, srcChannel); // AI থেকে অনুমোদন এবং টেক্সট প্রাপ্তি
+      const res = await AI(file.caption, bot, srcChannel);
       file.caption = res.text;
       const stats = fs.statSync(file.path);
       const sizeMB = stats.size / (1024 * 1024);
       const options = { caption: file.caption, parse_mode: 'HTML' };
 
       if (!res.should_post) {
-        if (file && fs.existsSync(file.path)) {
-          fs.unlinkSync(file.path);
-          console.log(`🧹 ডিলিট: ${file.path}`);
-        }
+        safeDelete(file.path);
         console.log('🚫 পোস্ট বাতিল: AI থেকে অনুমোদন নেই');
         return;
       }
@@ -167,36 +178,44 @@ async function postSingleMessage(message, srcChannel) {
           supportsStreaming: true,
         });
       } else {
-        const stream = fs.createReadStream(file.path);
         const isVideo = file.mime.startsWith('video');
         if (isVideo) options.supports_streaming = true;
 
         await (isVideo
-          ? bot.sendVideo(destinationChannel, stream, options)
-          : bot.sendPhoto(destinationChannel, stream, options));
+          ? bot.sendVideo(destinationChannel, file.path, options)
+          : bot.sendPhoto(destinationChannel, file.path, options));
       }
     } else if (message.message) {
       const text = formatMessage(message.message, message.entities || []);
-      const res =  await AI(text, bot, srcChannel);
+      const res = await AI(text, bot, srcChannel);
       console.log('📤 একক পোস্ট:', res.should_post);
       if (!res.should_post) {
         console.log('🚫 পোস্ট বাতিল: AI থেকে অনুমোদন নেই');
         return;
       }
-      
+
       await bot.sendMessage(destinationChannel, res.text, { parse_mode: 'HTML' });
     }
   } catch (err) {
     console.error('❌ একক পোস্টে সমস্যা:', err.message);
   } finally {
-    if (file && fs.existsSync(file.path)) {
-      fs.unlinkSync(file.path);
-      console.log(`🧹 ডিলিট: ${file.path}`);
-    }
+    if (file) safeDelete(file.path);
   }
 }
 
-// মূল ফাংশন
+async function keepChannelsAlive() {
+  try {
+    await client.getDialogs({ limit: 1 });
+    for (const uname of sourceChannels) {
+      try {
+        await client.getMessages(uname, { limit: 1 });
+      } catch (e) {
+      }
+    }
+  } catch (e) {
+  }
+}
+
 async function main() {
 
   await client.start({
@@ -219,6 +238,8 @@ async function main() {
       console.error(`❌ লোড ব্যর্থ: ${uname}`);
     }
   }
+
+  setInterval(keepChannelsAlive, 30 * 1000);
 
   client.addEventHandler(async (event) => {
     const message = event.message;
@@ -255,7 +276,7 @@ async function main() {
         const captionMessage = uniqueMessages.find(m => m.message && m.message.length > 0);
         let caption = captionMessage ? formatMessage(captionMessage.message, captionMessage.entities || []) : '';
 
-        const res = await AI(caption, bot, channelEntities.get(channelId).username); // AI থেকে অনুমোদন এবং টেক্সট প্রাপ্তি  
+        const res = await AI(caption, bot, channelEntities.get(channelId).username);
         if (!res.should_post) {
           console.log('🚫 গ্রুপ পোস্ট বাতিল: AI থেকে অনুমোদন নেই');
           mediaGroups.delete(groupedId);
@@ -274,6 +295,10 @@ async function main() {
           mediaItems[0].caption = caption;
           console.log(`📥 গ্রুপ পোস্ট (${mediaItems.length}): ${channelEntities.get(channelId).username}`);
           await postMediaGroup(mediaItems);
+        } else {
+          if (caption) {
+            await bot.sendMessage(destinationChannel, caption, { parse_mode: 'HTML' });
+          }
         }
 
         mediaGroups.delete(groupedId);
