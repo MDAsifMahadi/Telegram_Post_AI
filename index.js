@@ -14,14 +14,10 @@ import AI from "./postHandler.js"
 const apiId = parseInt(process.env.API_ID);
 const apiHash = process.env.API_HASH;
 const botToken = process.env.BOT_TOKEN;
-const sourceChannels = (process.env.SOURCE_CHANNELS || '')
-  .split(',')
-  .map(ch => ch.trim())
-  .filter(Boolean);
 const destinationChannel = process.env.DESTINATION_CHANNEL;
 const stringSession = new StringSession(process.env.SESSION || '');
 
-const requiredEnvVars = ['API_ID', 'API_HASH', 'BOT_TOKEN', 'SOURCE_CHANNELS', 'DESTINATION_CHANNEL'];
+const requiredEnvVars = ['API_ID', 'API_HASH', 'BOT_TOKEN', 'DESTINATION_CHANNEL'];
 for (const varName of requiredEnvVars) {
   if (!process.env[varName]) {
     console.error(`❌ Required env var ${varName} is missing`);
@@ -29,11 +25,41 @@ for (const varName of requiredEnvVars) {
   }
 }
 
+const adminId = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID) : null;
+const channelsConfigPath = 'channels.json';
+
+function loadChannels() {
+  try {
+    if (fs.existsSync(channelsConfigPath)) {
+      const data = JSON.parse(fs.readFileSync(channelsConfigPath, 'utf-8'));
+      if (Array.isArray(data) && data.length > 0) return data;
+    }
+  } catch {}
+  return (process.env.SOURCE_CHANNELS || '')
+    .split(',')
+    .map(ch => ch.trim())
+    .filter(Boolean);
+}
+
+function saveChannels(channels) {
+  try {
+    fs.writeFileSync(channelsConfigPath, JSON.stringify(channels, null, 2));
+  } catch (err) {
+    console.error('⚠️ Config save error:', err.message);
+  }
+}
+
+let sourceChannels = loadChannels();
+if (!fs.existsSync(channelsConfigPath) && sourceChannels.length > 0) {
+  saveChannels(sourceChannels);
+}
+let isRunning = true;
+
 if (!fs.existsSync('downloads')) {
   fs.mkdirSync('downloads');
 }
 
-const bot = new TelegramBot(botToken, { polling: false });
+const bot = new TelegramBot(botToken, { polling: { interval: 300, params: { timeout: 10 } } });
 const client = new TelegramClient(stringSession, apiId, apiHash, {
   connectionRetries: 5,
 });
@@ -241,6 +267,7 @@ async function keepChannelsAlive() {
 }
 
 async function pollMissedMessages() {
+  if (!isRunning) return;
   for (const uname of sourceChannels) {
     try {
       const messages = await client.getMessages(uname, { limit: 3 });
@@ -333,6 +360,7 @@ async function main() {
 
   const channelEntities = new Map();
   const channelIdToName = new Map();
+  const usernameToId = new Map();
   for (const uname of sourceChannels) {
     try {
       const ent = await client.getEntity(uname);
@@ -341,6 +369,7 @@ async function main() {
       channelEntities.set(idStr, ent);
       channelEntities.set(uname.replace('@', ''), ent);
       channelIdToName.set(idStr, uname.replace('@', ''));
+      usernameToId.set(uname.replace('@', ''), idStr);
       console.log(`✅ লোড: ${uname} (ID: ${idStr})`);
     } catch (err) {
       console.error(`❌ লোড ব্যর্থ: ${uname} -`, err.message);
@@ -350,7 +379,87 @@ async function main() {
   setInterval(keepChannelsAlive, 30 * 1000);
   setInterval(pollMissedMessages, 45 * 1000);
 
+  if (adminId) {
+    bot.onText(/\/start/, async (msg) => {
+      if (msg.from.id !== adminId) return;
+      isRunning = true;
+      await bot.sendMessage(msg.chat.id, '✅ Auto-post system started');
+    });
+
+    bot.onText(/\/stop/, async (msg) => {
+      if (msg.from.id !== adminId) return;
+      isRunning = false;
+      await bot.sendMessage(msg.chat.id, '⏸️ Auto-post system paused');
+    });
+
+    bot.onText(/\/status/, async (msg) => {
+      if (msg.from.id !== adminId) return;
+      const status = isRunning ? '✅ Running' : '⏸️ Paused';
+      const channels = sourceChannels.map((c, i) => `${i + 1}. ${c}`).join('\n');
+      await bot.sendMessage(msg.chat.id,
+        `📊 Status: ${status}\n📡 Destination: ${destinationChannel}\n📥 Sources:\n${channels || 'None'}`
+      );
+    });
+
+    bot.onText(/\/add (.+)/, async (msg, match) => {
+      if (msg.from.id !== adminId) return;
+      let channel = match[1].trim();
+      if (!channel) return;
+      if (!channel.startsWith('@')) channel = `@${channel}`;
+      if (sourceChannels.includes(channel)) {
+        await bot.sendMessage(msg.chat.id, `⚠️ ${channel} already exists`);
+        return;
+      }
+      try {
+        const ent = await client.getEntity(channel);
+        const rawId = ent.id?.value !== undefined ? ent.id.value : ent.id;
+        const idStr = String(rawId);
+        channelEntities.set(idStr, ent);
+        channelEntities.set(channel.replace('@', ''), ent);
+        channelIdToName.set(idStr, channel.replace('@', ''));
+        usernameToId.set(channel.replace('@', ''), idStr);
+        sourceChannels.push(channel);
+        saveChannels(sourceChannels);
+        await bot.sendMessage(msg.chat.id, `✅ Added ${channel}`);
+      } catch (err) {
+        await bot.sendMessage(msg.chat.id, `❌ Cannot resolve ${channel}: ${err.message}`);
+      }
+    });
+
+    bot.onText(/\/remove (.+)/, async (msg, match) => {
+      if (msg.from.id !== adminId) return;
+      let channel = match[1].trim();
+      if (!channel) return;
+      if (!channel.startsWith('@')) channel = `@${channel}`;
+      const idx = sourceChannels.indexOf(channel);
+      if (idx === -1) {
+        await bot.sendMessage(msg.chat.id, `⚠️ ${channel} not found`);
+        return;
+      }
+      const name = channel.replace('@', '');
+      const idStr = usernameToId.get(name);
+      if (idStr) {
+        channelEntities.delete(idStr);
+        channelIdToName.delete(idStr);
+        usernameToId.delete(name);
+      }
+      channelEntities.delete(name);
+      sourceChannels.splice(idx, 1);
+      saveChannels(sourceChannels);
+      await bot.sendMessage(msg.chat.id, `✅ Removed ${channel}`);
+    });
+
+    bot.onText(/\/list/, async (msg) => {
+      if (msg.from.id !== adminId) return;
+      const list = sourceChannels.map((c, i) => `${i + 1}. ${c}`).join('\n');
+      await bot.sendMessage(msg.chat.id, `📥 Source Channels (${sourceChannels.length}):\n${list || 'None'}`);
+    });
+  } else {
+    console.log('⚠️ ADMIN_ID not set. Bot commands disabled.');
+  }
+
   client.addEventHandler(async (event) => {
+    if (!isRunning) return;
     const message = event.message;
     if (!message || !message.peerId) return;
 

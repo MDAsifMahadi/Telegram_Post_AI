@@ -123,9 +123,10 @@ async function AI(message, bot, srcChannel) {
     // // const addedSrcChannel = parsed.text + ` #${srcChannel}` || parsed.text;
     // const addedSrcChannel = message + ` #${srcChannel}` || parsed.text;
     // parsed.text = addedSrcChannel;
+    const tag = srcChannel.replace('@', '');
     return {
       should_post: true,
-      text: message + ` #${srcChannel}`
+      text: message + ` #${tag}`
     };
   
   } catch (error) {
@@ -142,9 +143,10 @@ async function AI(message, bot, srcChannel) {
     // return await fallback(message, bot, srcChannel);
   }
 
+  const tag = srcChannel.replace('@', '');
   return {
     should_post: true,
-    text: message + ` #${srcChannel}`
+    text: message + ` #${tag}`
   };
 }
 // Fallback function to handle errors and use a different AI provider
