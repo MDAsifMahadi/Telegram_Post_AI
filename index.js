@@ -4,6 +4,7 @@ process.env.NTBA_FIX_350 = 0;
 import 'dotenv/config';
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
+import { NewMessage } from 'telegram/events/index.js';
 import input from 'input';
 import TelegramBot from 'node-telegram-bot-api';
 import fs from 'fs';
@@ -20,6 +21,14 @@ const sourceChannels = (process.env.SOURCE_CHANNELS || '')
 const destinationChannel = process.env.DESTINATION_CHANNEL;
 const stringSession = new StringSession(process.env.SESSION || '');
 
+const requiredEnvVars = ['API_ID', 'API_HASH', 'BOT_TOKEN', 'SOURCE_CHANNELS', 'DESTINATION_CHANNEL'];
+for (const varName of requiredEnvVars) {
+  if (!process.env[varName]) {
+    console.error(`❌ Required env var ${varName} is missing`);
+    process.exit(1);
+  }
+}
+
 if (!fs.existsSync('downloads')) {
   fs.mkdirSync('downloads');
 }
@@ -29,9 +38,29 @@ const client = new TelegramClient(stringSession, apiId, apiHash, {
   connectionRetries: 5,
 });
 
-const processedMessages = new Set();
+const processedMessages = new Map();
 const mediaGroups = new Map();
 const groupTimers = new Map();
+const MAX_PROCESSED = 2000;
+const POLL_CHECK_WINDOW_MS = 120_000;
+
+function makeKey(channelId, msgId) {
+  return `${channelId}:${msgId}`;
+}
+
+function markProcessed(key) {
+  processedMessages.set(key, Date.now());
+  if (processedMessages.size > MAX_PROCESSED) {
+    const cutoff = Date.now() - 3_600_000;
+    for (const [k, ts] of processedMessages) {
+      if (ts < cutoff) processedMessages.delete(k);
+    }
+  }
+}
+
+function isProcessed(key) {
+  return processedMessages.has(key);
+}
 
 function escapeHTML(str) {
   return str
@@ -206,13 +235,87 @@ async function postSingleMessage(message, srcChannel) {
 async function keepChannelsAlive() {
   try {
     await client.getDialogs({ limit: 1 });
-    for (const uname of sourceChannels) {
-      try {
-        await client.getMessages(uname, { limit: 1 });
-      } catch (e) {
+  } catch (err) {
+    console.error('⚠️ Dialogs refresh ব্যর্থ:', err.message);
+  }
+}
+
+async function pollMissedMessages() {
+  for (const uname of sourceChannels) {
+    try {
+      const messages = await client.getMessages(uname, { limit: 3 });
+      const now = Date.now();
+      for (const msg of messages) {
+        if (!msg) continue;
+        const msgDate = msg.date * 1000;
+        if (now - msgDate > POLL_CHECK_WINDOW_MS) continue;
+
+        const groupedId = msg.groupedId?.value;
+        const msgKey = groupedId ? `g:${groupedId}` : makeKey(uname, msg.id);
+        if (isProcessed(msgKey)) continue;
+
+        const entity = await client.getEntity(uname);
+        const channelId = String(entity.id?.value ?? entity.id ?? '');
+        console.log(`📥 পোলিং থেকে পাওয়া গেছে: ${uname} (msg ${msg.id})`);
+        markProcessed(msgKey);
+
+        if (groupedId) {
+          let groupMsgs = mediaGroups.get(groupedId);
+          if (!groupMsgs) {
+            groupMsgs = [];
+            mediaGroups.set(groupedId, groupMsgs);
+          }
+          if (!groupMsgs.some(m => m.id === msg.id)) {
+            groupMsgs.push(msg);
+          }
+          if (groupTimers.has(groupedId)) {
+            clearTimeout(groupTimers.get(groupedId));
+          }
+          const timeout = setTimeout(async () => {
+            try {
+              const msgs = mediaGroups.get(groupedId);
+              const unique = msgs.filter(
+                (m, i, self) => i === self.findIndex(x => x.id === m.id)
+              );
+              const captionMsg = unique.find(m => m.message?.length);
+              let caption = captionMsg
+                ? formatMessage(captionMsg.message, captionMsg.entities || [])
+                : '';
+              const res = await AI(caption, bot, uname);
+              if (!res.should_post) {
+                console.log('🚫 গ্রুপ পোস্ট বাতিল (পোল): AI থেকে অনুমোদন নেই');
+                mediaGroups.delete(groupedId);
+                groupTimers.delete(groupedId);
+                return;
+              }
+              caption = res.text;
+              const items = [];
+              for (const m of unique) {
+                const media = await downloadMedia(m);
+                if (media) items.push(media);
+              }
+              if (items.length > 0) {
+                items[0].caption = caption;
+                await postMediaGroup(items);
+              } else if (caption) {
+                await bot.sendMessage(destinationChannel, caption, { parse_mode: 'HTML' });
+              }
+              mediaGroups.delete(groupedId);
+              groupTimers.delete(groupedId);
+            } catch (err) {
+              console.error('❌ গ্রুপ পোস্টে সমস্যা (পোল):', err.message);
+              mediaGroups.delete(groupedId);
+              groupTimers.delete(groupedId);
+            }
+          }, 2000);
+          groupTimers.set(groupedId, timeout);
+        } else {
+          await postSingleMessage(msg, uname);
+        }
       }
+    } catch (err) {
+      console.error(`⚠️ পোল ব্যর্থ: ${uname} -`, err.message);
     }
-  } catch (e) {
   }
 }
 
@@ -229,28 +332,45 @@ async function main() {
   console.log('🔑 Session:\n', client.session.save());
 
   const channelEntities = new Map();
+  const channelIdToName = new Map();
   for (const uname of sourceChannels) {
     try {
       const ent = await client.getEntity(uname);
-      channelEntities.set(ent.id.value, ent);
-      console.log(`✅ লোড: ${uname}`);
-    } catch {
-      console.error(`❌ লোড ব্যর্থ: ${uname}`);
+      const rawId = ent.id?.value !== undefined ? ent.id.value : ent.id;
+      const idStr = String(rawId);
+      channelEntities.set(idStr, ent);
+      channelEntities.set(uname.replace('@', ''), ent);
+      channelIdToName.set(idStr, uname.replace('@', ''));
+      console.log(`✅ লোড: ${uname} (ID: ${idStr})`);
+    } catch (err) {
+      console.error(`❌ লোড ব্যর্থ: ${uname} -`, err.message);
     }
   }
 
   setInterval(keepChannelsAlive, 30 * 1000);
+  setInterval(pollMissedMessages, 45 * 1000);
 
   client.addEventHandler(async (event) => {
     const message = event.message;
-    if (!message || !message.peerId || !message.peerId.channelId) return;
+    if (!message || !message.peerId) return;
 
-    const channelId = message.peerId.channelId.value;
-    if (!channelEntities.has(channelId)) return;
+    let channelId = '';
+    let entity = null;
+    if (message.peerId.channelId) {
+      channelId = String(message.peerId.channelId?.value ?? message.peerId.channelId);
+      entity = channelEntities.get(channelId);
+    }
+    if (!entity) {
+      const chatId = message.chat?.id?.value ?? message.chat?.id ?? message.chatId;
+      if (chatId) entity = channelEntities.get(String(chatId));
+    }
+    if (!entity) return;
+
+    const srcName = entity.username || channelIdToName.get(channelId) || String(channelId);
 
     const groupedId = message.groupedId?.value;
-    const messageKey = groupedId || message.id;
-    if (processedMessages.has(messageKey)) return;
+    const messageKey = groupedId ? `g:${groupedId}` : makeKey(srcName, message.id);
+    if (isProcessed(messageKey)) return;
 
     if (groupedId) {
       if (!mediaGroups.has(groupedId)) {
@@ -267,7 +387,7 @@ async function main() {
 
       const timeout = setTimeout(async () => {
         const group = mediaGroups.get(groupedId);
-        processedMessages.add(groupedId);
+        markProcessed(messageKey);
 
         const uniqueMessages = group.filter(
           (msg, index, self) => index === self.findIndex(m => m.id === msg.id)
@@ -276,7 +396,7 @@ async function main() {
         const captionMessage = uniqueMessages.find(m => m.message && m.message.length > 0);
         let caption = captionMessage ? formatMessage(captionMessage.message, captionMessage.entities || []) : '';
 
-        const res = await AI(caption, bot, channelEntities.get(channelId).username);
+        const res = await AI(caption, bot, srcName);
         if (!res.should_post) {
           console.log('🚫 গ্রুপ পোস্ট বাতিল: AI থেকে অনুমোদন নেই');
           mediaGroups.delete(groupedId);
@@ -293,7 +413,7 @@ async function main() {
 
         if (mediaItems.length > 0) {
           mediaItems[0].caption = caption;
-          console.log(`📥 গ্রুপ পোস্ট (${mediaItems.length}): ${channelEntities.get(channelId).username}`);
+          console.log(`📥 গ্রুপ পোস্ট (${mediaItems.length}): ${srcName}`);
           await postMediaGroup(mediaItems);
         } else {
           if (caption) {
@@ -307,11 +427,14 @@ async function main() {
 
       groupTimers.set(groupedId, timeout);
     } else {
-      processedMessages.add(message.id);
-      console.log(`📥 একক পোস্ট: ${channelEntities.get(channelId).username}`);
-      await postSingleMessage(message, channelEntities.get(channelId).username);
+      markProcessed(messageKey);
+      console.log(`📥 একক পোস্ট: ${srcName}`);
+      await postSingleMessage(message, srcName);
     }
-  });
+  }, new NewMessage({}));
 }
 
-main();
+main().catch(err => {
+  console.error('❌ Fatal error:', err.message);
+  process.exit(1);
+});

@@ -141,6 +141,11 @@ async function AI(message, bot, srcChannel) {
 
     // return await fallback(message, bot, srcChannel);
   }
+
+  return {
+    should_post: true,
+    text: message + ` #${srcChannel}`
+  };
 }
 // Fallback function to handle errors and use a different AI provider
 // const fallback = async (message, bot, srcChannel) => {
